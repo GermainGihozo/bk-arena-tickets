@@ -24,16 +24,49 @@ function App() {
   const [ticketPrice, setTicketPrice] = useState('');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
+  const [network, setNetwork] = useState(null);
+  const [networkWarning, setNetworkWarning] = useState('');
 
   useEffect(() => {
     checkWalletConnection();
+
+    if (typeof window.ethereum !== 'undefined') {
+      const handleChainChanged = () => {
+        setNetwork(null);
+        setContract(null);
+        setUserTickets([]);
+        setNetworkWarning('');
+        setMessage('Network changed. Please reconnect your wallet.');
+        connectWallet();
+      };
+
+      const handleAccountsChanged = (accounts) => {
+        if (accounts.length > 0) {
+          setAccount(accounts[0]);
+          connectWallet();
+        } else {
+          setAccount(null);
+          setContract(null);
+          setUserTickets([]);
+          setMessage('Please connect your wallet');
+        }
+      };
+
+      window.ethereum.on('chainChanged', handleChainChanged);
+      window.ethereum.on('accountsChanged', handleAccountsChanged);
+
+      return () => {
+        window.ethereum.removeListener('chainChanged', handleChainChanged);
+        window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
+      };
+    }
   }, []);
 
   useEffect(() => {
-    if (account && contract) {
+    if (account && contract && network?.chainId === 31337) {
       loadUserTickets();
     }
-  }, [account, contract]);
+  }, [account, contract, network]);
 
   const checkWalletConnection = async () => {
     if (typeof window.ethereum !== 'undefined') {
@@ -60,10 +93,27 @@ function App() {
 
       const provider = new ethers.BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
+      const network = await provider.getNetwork();
+      setNetwork(network);
+
+      const code = await provider.getCode(CONTRACT_ADDRESS);
+      if (!code || code === '0x') {
+        setNetworkWarning('No contract found at the configured address on this network. Switch MetaMask to local Hardhat (31337) or deploy the contract to the active network.');
+        setMessage('Contract not found on current network.');
+        setContract(null);
+        return;
+      }
+
       const contractInstance = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
       setContract(contractInstance);
 
-      setMessage('Wallet connected successfully!');
+      if (network.chainId !== 31337) {
+        setNetworkWarning('Please connect MetaMask to the local Hardhat network (chainId 31337).');
+        setMessage('Wallet connected, but network mismatch detected.');
+      } else {
+        setNetworkWarning('');
+        setMessage('Wallet connected successfully!');
+      }
     } catch (error) {
       console.error('Error connecting wallet:', error);
       setMessage('Failed to connect wallet');
@@ -72,67 +122,52 @@ function App() {
 
   const loadUserTickets = async () => {
     if (!contract || !account) return;
-    
+
     try {
       console.log('=== LOADING TICKETS ===');
       console.log('Account:', account);
       console.log('Contract:', await contract.getAddress());
-      
-      // Query ALL TicketPurchased events
-      const allEventsFilter = contract.filters.TicketPurchased();
-      const allEvents = await contract.queryFilter(allEventsFilter);
-      console.log('ALL Purchase events:', allEvents);
-      console.log('Number of events:', allEvents.length);
-      
-      if (allEvents.length > 0) {
-        console.log('First event args:', allEvents[0].args);
-      }
-      
-      // Filter events for this user (args[1] is the buyer address)
-      const userEvents = allEvents.filter(event => 
-        event.args[1].toLowerCase() === account.toLowerCase()
-      );
-      console.log('User purchase events:', userEvents);
-      
-      if (userEvents.length === 0) {
+
+      // Read ticket IDs directly from the contract storage instead of relying only on event logs.
+      const userTicketIds = await contract.getUserTickets(account);
+      console.log('User ticket IDs:', userTicketIds.map((id) => id.toString()));
+
+      if (userTicketIds.length === 0) {
         setUserTickets([]);
         return;
       }
-      
-      // Get ticket details for each event
+
       const ticketsData = await Promise.all(
-        userEvents.map(async (event) => {
-          const ticketId = event.args[0];
+        userTicketIds.map(async (ticketId) => {
           console.log('Loading ticket ID:', ticketId.toString());
           try {
             const ticket = await contract.getTicket(ticketId);
             console.log('Ticket data:', ticket);
-            
-            // Only include if still owned by user (not transferred)
-            if (ticket[3].toLowerCase() === account.toLowerCase()) {
-              return {
-                ticketId: ticket[0].toString(),
-                eventName: ticket[1],
-                price: ethers.formatEther(ticket[2]),
-                owner: ticket[3],
-                isUsed: ticket[4],
-                purchaseTime: new Date(Number(ticket[5]) * 1000).toLocaleString()
-              };
-            }
-            return null;
+
+            return {
+              ticketId: ticket[0].toString(),
+              eventName: ticket[1],
+              price: ethers.formatEther(ticket[2]),
+              owner: ticket[3],
+              isUsed: ticket[4],
+              purchaseTime: new Date(Number(ticket[5]) * 1000).toLocaleString()
+            };
           } catch (err) {
             console.log(`Error loading ticket ${ticketId}:`, err.message);
             return null;
           }
         })
       );
-      
-      // Filter out null values (transferred tickets)
-      const validTickets = ticketsData.filter(t => t !== null);
+
+      const validTickets = ticketsData.filter((t) => t !== null);
       console.log('Final user tickets:', validTickets);
       setUserTickets(validTickets);
     } catch (error) {
       console.error('Error loading tickets:', error);
+      if (error.message && error.message.includes('could not decode result data')) {
+        setNetworkWarning('The contract call returned invalid data. This usually means the contract is not deployed at the configured address on the current network.');
+        setMessage('Contract/network mismatch detected when loading tickets.');
+      }
     }
   };
 
@@ -148,10 +183,24 @@ function App() {
 
     try {
       const priceInWei = ethers.parseEther(ticketPrice);
-      const tx = await contract.purchaseTicket(eventName, priceInWei, { value: priceInWei });
-      setMessage('Transaction submitted. Waiting for confirmation...');
+      console.log('Price in Wei:', priceInWei.toString());
+      console.log('Event name:', eventName);
       
-      await tx.wait();
+      // Estimate gas first
+      const gasEstimate = await contract.purchaseTicket.estimateGas(
+        eventName, priceInWei, { value: priceInWei }
+      );
+      console.log('Gas estimate:', gasEstimate.toString());
+
+      const tx = await contract.purchaseTicket(eventName, priceInWei, { 
+        value: priceInWei,
+        gasLimit: gasEstimate * 2n
+      });
+      setMessage('Transaction submitted. Waiting for confirmation...');
+      console.log('Transaction hash:', tx.hash);
+      
+      const receipt = await tx.wait();
+      console.log('Transaction receipt:', receipt);
       setMessage('Ticket purchased successfully!');
       
       setEventName('');
@@ -167,6 +216,12 @@ function App() {
 
   const transferTicket = async (ticketId, recipientAddress) => {
     if (!contract) return;
+
+    // Validate it's a proper address, not an ENS name
+    if (!ethers.isAddress(recipientAddress)) {
+      setMessage('Please enter a valid Ethereum address (0x...)');
+      return;
+    }
 
     setLoading(true);
     try {
@@ -201,7 +256,13 @@ function App() {
           <>
             <div className="account-info">
               <p>Connected: {account.slice(0, 6)}...{account.slice(-4)}</p>
+              {network && (
+                <p>Network: {network.name || 'unknown'} ({network.chainId})</p>
+              )}
             </div>
+            {networkWarning && (
+              <div className="warning">{networkWarning}</div>
+            )}
 
             <div className="purchase-section">
               <h2>Purchase Ticket</h2>

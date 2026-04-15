@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { ethers } from 'ethers';
 import Ticket from './components/Ticket';
+import AdminPanel from './components/AdminPanel';
 import './App.css';
 
 const CONTRACT_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
@@ -12,6 +13,7 @@ const CONTRACT_ABI = [
   "function getUserTickets(address _user) public view returns (uint256[])",
   "function verifyTicketOwnership(uint256 _ticketId, address _owner) public view returns (bool)",
   "function getTotalTickets() public view returns (uint256)",
+  "function admin() public view returns (address)",
   "event TicketPurchased(uint256 indexed ticketId, address indexed buyer, string eventName, uint256 price)",
   "event TicketTransferred(uint256 indexed ticketId, address indexed from, address indexed to)"
 ];
@@ -26,6 +28,8 @@ function App() {
   const [message, setMessage] = useState('');
   const [network, setNetwork] = useState(null);
   const [networkWarning, setNetworkWarning] = useState('');
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [activeTab, setActiveTab] = useState('tickets');
 
   useEffect(() => {
     checkWalletConnection();
@@ -106,6 +110,10 @@ function App() {
 
       const contractInstance = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
       setContract(contractInstance);
+
+      // Check if connected account is the admin
+      const adminAddress = await contractInstance.admin();
+      setIsAdmin(adminAddress.toLowerCase() === accounts[0].toLowerCase());
 
       if (network.chainId !== 31337) {
         setNetworkWarning('Please connect MetaMask to the local Hardhat network (chainId 31337).');
@@ -257,56 +265,83 @@ function App() {
             <div className="account-info">
               <p>Connected: {account.slice(0, 6)}...{account.slice(-4)}</p>
               {network && (
-                <p>Network: {network.name || 'unknown'} ({network.chainId})</p>
+                <p>Network: {network.name || 'unknown'} ({network.chainId.toString()})</p>
               )}
+              {isAdmin && <span className="admin-badge">🛡️ Admin</span>}
             </div>
             {networkWarning && (
               <div className="warning">{networkWarning}</div>
             )}
 
-            <div className="purchase-section">
-              <h2>Purchase Ticket</h2>
-              <form onSubmit={purchaseTicket}>
-                <input
-                  type="text"
-                  placeholder="Event Name (e.g., BK Arena Concert)"
-                  value={eventName}
-                  onChange={(e) => setEventName(e.target.value)}
-                  required
-                />
-                <input
-                  type="number"
-                  step="0.001"
-                  placeholder="Price in ETH (e.g., 0.1)"
-                  value={ticketPrice}
-                  onChange={(e) => setTicketPrice(e.target.value)}
-                  required
-                />
-                <button type="submit" disabled={loading} className="btn-primary">
-                  {loading ? 'Processing...' : 'Purchase Ticket'}
+            {/* Tabs */}
+            <div className="tabs">
+              <button
+                className={`tab ${activeTab === 'tickets' ? 'active' : ''}`}
+                onClick={() => setActiveTab('tickets')}
+              >
+                🎟️ My Tickets
+              </button>
+              {isAdmin && (
+                <button
+                  className={`tab ${activeTab === 'admin' ? 'active' : ''}`}
+                  onClick={() => setActiveTab('admin')}
+                >
+                  🛡️ Admin Panel
                 </button>
-              </form>
+              )}
             </div>
 
-            {message && <div className="message">{message}</div>}
-
-            <div className="tickets-section">
-              <h2>My Tickets ({userTickets.length})</h2>
-              <div className="tickets-grid">
-                {userTickets.length === 0 ? (
-                  <p>No tickets yet. Purchase your first ticket above!</p>
-                ) : (
-                  userTickets.map((ticket) => (
-                    <Ticket
-                      key={ticket.ticketId}
-                      ticket={ticket}
-                      onTransfer={transferTicket}
-                      loading={loading}
+            {activeTab === 'tickets' && (
+              <>
+                <div className="purchase-section">
+                  <h2>Purchase Ticket</h2>
+                  <form onSubmit={purchaseTicket}>
+                    <input
+                      type="text"
+                      placeholder="Event Name (e.g., BK Arena Concert)"
+                      value={eventName}
+                      onChange={(e) => setEventName(e.target.value)}
+                      required
                     />
-                  ))
-                )}
-              </div>
-            </div>
+                    <input
+                      type="number"
+                      step="0.001"
+                      placeholder="Price in ETH (e.g., 0.1)"
+                      value={ticketPrice}
+                      onChange={(e) => setTicketPrice(e.target.value)}
+                      required
+                    />
+                    <button type="submit" disabled={loading} className="btn-primary">
+                      {loading ? 'Processing...' : 'Purchase Ticket'}
+                    </button>
+                  </form>
+                </div>
+
+                {message && <div className="message">{message}</div>}
+
+                <div className="tickets-section">
+                  <h2>My Tickets ({userTickets.length})</h2>
+                  <div className="tickets-grid">
+                    {userTickets.length === 0 ? (
+                      <p>No tickets yet. Purchase your first ticket above!</p>
+                    ) : (
+                      userTickets.map((ticket) => (
+                        <Ticket
+                          key={ticket.ticketId}
+                          ticket={ticket}
+                          onTransfer={transferTicket}
+                          loading={loading}
+                        />
+                      ))
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {activeTab === 'admin' && isAdmin && (
+              <AdminPanel contract={contract} account={account} />
+            )}
           </>
         )}
       </div>

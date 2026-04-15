@@ -1,0 +1,8 @@
+After redeploying the contract, update this address in src/App.jsx:
+
+1. Run: npx hardhat run scripts/deploy.js --network localhost
+2. Copy the contract address from the output
+3. Replace CONTRACT_ADDRESS in src/App.jsx with the new address
+4. Refresh your browser
+5. Make sure MetaMask is connected to Localhost 8545
+6. Import a test account from Hardhat node using one of the private keys shown
